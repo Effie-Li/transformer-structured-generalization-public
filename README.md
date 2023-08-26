@@ -10,6 +10,6 @@ If you use this work, please cite:
   title={Representations and Computations in Transformers that Support Generalization on Structured Tasks},
   author={Li, Yuxuan and McClelland, James L},
   journal={TMLR},
-  year={2022}
+  year={2023}
 }
 ```
