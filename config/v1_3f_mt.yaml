@@ -1,0 +1,47 @@
+---
+data:
+  item:
+    shape: 5
+    color: 5
+    texture: 5
+  feature_order: ['shape', 'color', 'texture']
+  task: ['copy','reverse','sort_by_shape','reverse_sort_by_shape','sort_by_shape_first','sort_by_color','reverse_sort_by_color','sort_by_color_first']
+dataset:
+  n_seq: 100000
+  min_len: 5
+  max_len: 50
+  max_label: 50
+  max_context: 10
+  fname: '/data5/liyuxuan/multitask/dataset/v1/shape5-color5-texture5-task8-N100000.pkl'
+  use_tasks: ['copy','reverse','sort_by_shape','sort_by_shape_first','sort_by_color','sort_by_color_first']
+  dataset_frac: 1.0
+  batch_size: 128
+  split_params: 
+    mode: 'len'
+    train_range: [5,25]
+    val_count: 500
+model:
+  lr: 0.0005
+  teacher_forcing: 1.0
+  pos_encoding: 'label'
+  embed_dim: 192
+  n_heads: [1,2]
+  depth: 2
+  mlp_dim: 64
+  use_task_token: False
+  add_task_embedding: True
+  dropout: 0.
+wandb:
+  project: 'multitask-transformer-v1'
+  save_dir: '/data5/liyuxuan/multitask/'
+checkpoint:
+  monitor: 'val/label_acc'
+  mode: 'max'
+  save_top_k: -1
+  save_last: True
+  every_n_epochs: 1
+trainer:
+  log_every_n_steps: 10
+  val_check_interval: .1
+  max_epochs: 50
+  deterministic: True

@@ -1,0 +1,233 @@
+---
+title: "transformer_representation_svd"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r message=FALSE, results='hide'}
+library(tidyverse)
+library(lme4)
+
+theme_set(theme(text = element_text(size = 14)) +
+          theme(axis.text=element_text(size=11)) +
+          theme(axis.title=element_text(size=12))
+          )
+
+predictors = c('shape', 'color', 'texture', 'label', 'residual')
+
+lm_sumsq = function(df, col_name) {
+  fit = lm(df%>%pull(col_name) ~ df%>%pull(shape) + df%>%pull(color) + df%>%pull(texture) + df%>%pull(label))
+  return (tibble(predictor=predictors, sum_sq=anova(fit)$`Sum Sq`))
+}
+
+compute_sumsq_table = function(df, dims) {
+  sumsq_table = dims %>%
+    map_dfr(function(x) lm_sumsq(df, paste('X', x, sep=''))) %>%
+    mutate(dim=rep(dims, each=length(predictors))) %>%
+    pivot_wider(names_from='predictor', values_from=sum_sq)
+  return (sumsq_table)
+}
+
+read_svd_u = function(path, fname, keep_task=F, L1_filter='') {
+  keep_dim = c('layer', 'shape', 'color', 'texture', 'label')
+  if (keep_task) {
+    keep_dim = c(keep_dim, 'task')
+  }
+  svdu = read.csv(paste(path, fname, sep='')) %>%
+    {if (L1_filter=='probe' || L1_filter=='target') filter(., source_probe_target==L1_filter) else .} %>%
+    mutate_at(c('shape', 'color', 'texture', 'label'), as.factor) %>%
+    select(all_of(keep_dim), starts_with('X'), -X)
+}
+
+read_svd_s = function(path, fname){
+  singular_vals = read.csv(paste(path, fname, sep='')) %>% pull(X0)
+}
+
+singletask_sumsq = function(svdu, singular_vals, dims, ylims=NULL, secaxis_scale=1) {
+  # compute how each factor explains variance at each dimension
+  sumsq_table = compute_sumsq_table(df = svdu, dims = dims) %>%
+    mutate(singular_val = singular_vals[1:length(dims)]) %>%
+    pivot_longer(predictors, names_to='predictor', values_to='sum_sq') %>%
+    mutate(predictor=factor(predictor, levels=predictors)) %>%
+    mutate(var_explained_ratio=sum_sq*singular_val*singular_val/sum(singular_vals**2))
+  
+  ggplot() +
+    geom_col(data=sumsq_table, mapping=aes(x=dim, y=var_explained_ratio*100)) +
+    geom_hline(data=sumsq_table %>% group_by(predictor) %>% summarize(var_explained_ratio=sum(var_explained_ratio)),
+               mapping=aes(yintercept=var_explained_ratio*100/secaxis_scale), color='#326fa8') +
+    facet_grid(predictor~.) +
+    coord_cartesian(ylim=ylims) +
+    scale_y_continuous(breaks=c(0,5,10), sec.axis=sec_axis(trans=~.*secaxis_scale)) +
+    theme(axis.text.y.right = element_text(color='#326fa8'),
+          axis.ticks.y.right = element_line(color='#326fa8'),
+          strip.placement='outside') +
+    ylab('variance explained (%)') +
+    xlab('dimension')
+}
+
+multitask_sumsq = function(svdu, singular_vals, dims, ylims=NULL, secaxis_scale=1) {
+  # obtain how each task divides the unit-variance of each singular vector
+  task_sum_sq = svdu %>% 
+    group_by(task) %>% 
+    summarize(across(starts_with('X'), function (x) sum(x**2))) %>% 
+    pivot_longer(starts_with('X'), names_to='dim', values_to='task_sum_sq') %>% 
+    mutate(dim=as.numeric(substr(dim, 2, 4))) %>%
+    mutate(task = ifelse(task=='group[shape]', 'group[s]', task)) %>%
+    mutate(task = ifelse(task=='group[color]', 'group[c]', task)) %>%
+    mutate(task = ifelse(task=='sort[shape]', 'sort[s,c,t]', task)) %>%
+    mutate(task = ifelse(task=='sort[color]', 'sort[c,s,t]', task)) %>%
+    mutate(task = factor(task, levels=c('copy', 'reverse', 'group[s]', 'group[c]', 'sort[s,c,t]', 'sort[c,s,t]')))
+  
+  sumsq_table = svdu %>% pull(task) %>% unique() %>%
+    map_dfr(function(t) {compute_sumsq_table(df=svdu%>%filter(task==t), dims=dims)}) %>%
+    mutate(task = rep(svdu %>% pull(task) %>% unique(), each=length(dims))) %>%
+    mutate(task = ifelse(task=='group[shape]', 'group[s]', task)) %>%
+    mutate(task = ifelse(task=='group[color]', 'group[c]', task)) %>%
+    mutate(task = ifelse(task=='sort[shape]', 'sort[s,c,t]', task)) %>%
+    mutate(task = ifelse(task=='sort[color]', 'sort[c,s,t]', task)) %>%
+    mutate(task = factor(task, levels=c('copy', 'reverse', 'group[s]', 'group[c]', 'sort[s,c,t]', 'sort[c,s,t]'))) %>%
+    pivot_longer(predictors, names_to='predictor', values_to='sum_sq') %>%
+    mutate(predictor=factor(predictor, levels=predictors)) %>%
+    # turn sum_sq explained from each regression into ratios (sums to 1 in each task x dim)
+    group_by(task, dim) %>%
+    summarize(predictor=predictor, sum_sq=sum_sq, sum_sq_ratio=sum_sq/sum(sum_sq)) %>%
+    ungroup() %>%
+    # scale sum_sq_ratio by variance associated with that task in each dimension (sums to 1 in each dim)
+    merge(task_sum_sq) %>%
+    mutate(dim_var_explained=sum_sq_ratio*task_sum_sq) %>% # same as ratio as the total variance in each dim is 1
+    # finally scale by variance associated with each dimension (sums to 1 across all dims)
+    merge(singular_vals) %>%
+    mutate(var_explained_ratio=dim_var_explained*singular_val*singular_val/sum(singular_vals$singular_val**2))
+  
+  return (sumsq_table)
+  
+  # ggplot() +
+  #   geom_col(data=sumsq_table, mapping=aes(x=dim, y=var_explained_ratio*100)) +
+  #   geom_hline(data=sumsq_table %>% group_by(task, predictor) %>% summarize(var_explained_ratio=sum(var_explained_ratio)),
+  #              mapping=aes(yintercept=var_explained_ratio*100/secaxis_scale), color='#326fa8') +
+  #   facet_grid(predictor~task) +
+  #   coord_cartesian(ylim=ylims) +
+  #   scale_y_continuous(sec.axis=sec_axis(trans=~.*secaxis_scale)) +
+  #   theme(axis.text.y.right = element_text(color='#326fa8'),
+  #         axis.ticks.y.right = element_line(color='#326fa8'),
+  #         strip.placement='outside') +
+  #   ylab('variance explained (%)') +
+  #   xlab('dimension')
+}
+```
+
+```{r, warning=FALSE, fig.height=3.3, fig.width=2.2}
+
+path = '~/Desktop/multitask-transformer/svd/single-task-svd/8goxw4zl/'
+
+singletask_sumsq(svdu=read_svd_u(path, 'source-input-svd-u.csv'),
+                 singular_vals=read_svd_s(path, 'source-input-svd-s.csv'),
+                 dims=0:61, secaxis_scale=6, ylims=c(0,12))
+# ggsave(paste(path, 'source-input.pdf', sep=''))
+
+singletask_sumsq(svdu=read_svd_u(path, 'spjoint-L0-svd-u.csv'),
+                 singular_vals=read_svd_s(path, 'spjoint-L0-svd-s.csv'),
+                 dims=0:127, secaxis_scale=6)
+# ggsave(paste(path, 'spjoint-L0.pdf', sep=''))
+
+singletask_sumsq(svdu=read_svd_u(path, 'spjoint-L0-svd-u-seqlen=2.csv', L1_filter='probe'),
+                 singular_vals=read_svd_s(path, 'spjoint-L0-svd-s-seqlen=2.csv'),
+                 dims=0:127, secaxis_scale=6)
+# ggsave(paste(path, 'spjoint-L0-seqlen=2.pdf', sep=''))
+
+singletask_sumsq(svdu=read_svd_u(path, 'ptjoint-L1-svd-u-seqlen=2.csv', L1_filter='target'),
+                 singular_vals=read_svd_s(path, 'ptjoint-L1-svd-s-seqlen=2.csv'),
+                 dims=0:127, ylims=c(0,0.06), secaxis_scale=16)
+# ggsave(paste(path, 'ptjoint-L1-seqlen=2-probe.pdf', sep=''))
+# ggsave(paste(path, 'ptjoint-L1-seqlen=2-target.pdf', sep=''))
+```
+
+```{r, warning=FALSE, fig.height=3.3, fig.width=2.2}
+
+path = '~/Desktop/multitask-transformer/svd/multi-task-svd/3cyk4n4w/'
+
+singletask_sumsq(svdu=read_svd_u(path, 'source-input-svd-u.csv'),
+                 singular_vals=read_svd_s(path, 'source-input-svd-s.csv'),
+                 dims=0:61, secaxis_scale=6, ylims=c(0,12))
+# ggsave(paste(path, 'source-input.pdf', sep=''))
+```
+
+```{r, warning=FALSE, fig.height=3.3, fig.width=6.6}
+
+path = '~/Desktop/multitask-transformer/svd/multi-task-svd/3cyk4n4w/'
+
+multitask_sumsq(svdu=read_svd_u(path, 'spjoint-L0-svd-u.csv', keep_task=T),
+                 singular_vals=read.csv(paste(path, 'spjoint-L0-svd-s.csv', sep='')) %>% rename(dim=X, singular_val=X0),
+                 dims=0:110, secaxis_scale=5)
+# ggsave(paste(path, 'spjoint-L0.pdf', sep=''))
+```
+
+```{r, warning=FALSE}
+
+path = '~/Desktop/multitask-transformer/svd/multi-task-svd/3cyk4n4w/'
+
+multitask_sumsq(svdu=read_svd_u(path, 'ptjoint-L1-svd-u-seqlen=2.csv', keep_task=T, L1_filter='probe'),
+                 singular_vals=read.csv(paste(path, 'ptjoint-L1-svd-s-seqlen=2.csv', sep='')) %>% 
+                                 rename(dim=X, singular_val=X0),
+                 dims=0:191, ylims=c(0, 0.011), secaxis_scale=10)
+# ggsave(paste(path, 'ptjoint-L1-seqlen=2-probe.pdf', sep=''))
+
+multitask_sumsq(svdu=read_svd_u(path, 'ptjoint-L1-svd-u-seqlen=2.csv', keep_task=T, L1_filter='target'),
+                 singular_vals=read.csv(paste(path, 'ptjoint-L1-svd-s-seqlen=2.csv', sep='')) %>% 
+                                 rename(dim=X, singular_val=X0),
+                 dims=0:191, ylims=c(0, 0.011), secaxis_scale=10)
+# ggsave(paste(path, 'ptjoint-L1-seqlen=2-target.pdf', sep=''))
+
+```
+
+
+```{r, warning=FALSE}
+
+path = '~/Desktop/multitask-transformer/svd/multi-task-svd/3cyk4n4w/'
+
+probe_sumsq = multitask_sumsq(svdu=read_svd_u(path, 'ptjoint-L1-svd-u-seqlen=2.csv', 
+                                              keep_task=T, L1_filter='probe'),
+                              singular_vals=read.csv(paste(path, 'ptjoint-L1-svd-s-seqlen=2.csv', sep='')) %>% 
+                                             rename(dim=X, singular_val=X0),
+                              dims=0:191) %>%
+  mutate(source_probe_target='probe')
+
+target_sumsq = multitask_sumsq(svdu=read_svd_u(path, 'ptjoint-L1-svd-u-seqlen=2.csv', 
+                                               keep_task=T, L1_filter='target'),
+                               singular_vals=read.csv(paste(path, 'ptjoint-L1-svd-s-seqlen=2.csv', sep='')) %>% 
+                                               rename(dim=X, singular_val=X0),
+                               dims=0:191) %>%
+  mutate(source_probe_target='target')
+
+sumsq_table = rbind(probe_sumsq, target_sumsq) %>%
+  mutate(source_probe_target = factor(source_probe_target, levels=c('target', 'probe')))
+
+ylims=c(0, 0.5)
+secaxis_scale=28
+
+ggplot() +
+  geom_col(data=sumsq_table, mapping=aes(x=dim, y=var_explained_ratio*100, fill=source_probe_target),
+           position='identity', alpha=0.6) +
+  geom_hline(data=sumsq_table %>% group_by(source_probe_target, task, predictor) %>% 
+                  summarize(var_explained_ratio=sum(var_explained_ratio)),
+             mapping=aes(yintercept=var_explained_ratio*100/secaxis_scale, color=source_probe_target)) +
+  facet_grid(predictor~task) +
+  coord_cartesian(ylim=ylims) +
+  scale_x_continuous(breaks=c(0,60,120,180)) +
+  scale_y_continuous(breaks=c(0.1,0.3,0.5), sec.axis=sec_axis(trans=~.*secaxis_scale)) +
+  theme(axis.text.y.right = element_text(color='#326fa8'),
+        axis.ticks.y.right = element_line(color='#326fa8'),
+        strip.placement='outside') + 
+  scale_color_manual(labels=c('target', 'probe'), values=c('#326fa8', '#9fb9d1')) +
+  scale_fill_manual(labels=c('target','probe'), values=c('black', '#9fb9d1')) +
+  guides(fill='none', color='none') +
+  ylab('variance explained (%)') +
+  xlab('dimension')
+  # guides(fill=guide_legend(title='', nrow=1, byrow=T), color=guide_legend(title='')) +
+  # theme(legend.position='top')
+
+# ggsave(paste(path, 'ptjoint-L1-svd-v-seqlen=2.pdf', sep=''))
+```
